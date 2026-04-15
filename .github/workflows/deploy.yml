@@ -44,8 +44,9 @@ jobs:
             npm install --prefer-offline
             npm run build
 
-            # Создаём systemd service (если ещё нет)
-            cat > /etc/systemd/system/polybot-ui.service << 'EOF'
+            # Создаём systemd service (путь serve определяем динамически)
+            SERVE_BIN=$(which serve)
+            cat > /etc/systemd/system/polybot-ui.service << EOF
 [Unit]
 Description=Polymarket Bot UI
 After=network.target
@@ -53,7 +54,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/root/polybot/ui
-ExecStart=/usr/local/bin/serve dist -p 3000 --no-clipboard
+ExecStart=${SERVE_BIN} dist -p 3000 --no-clipboard
 Restart=always
 RestartSec=3
 
