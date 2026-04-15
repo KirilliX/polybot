@@ -1,65 +1,131 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  Cell, ComposedChart, Line, Area
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell
 } from 'recharts';
 import {
-  Zap, ShieldAlert, Coins, Layers, ArrowDownWideNarrow,
-  Activity, Timer, ChevronRight, CheckCircle2, AlertTriangle
+  Zap, Layers, Activity, CheckCircle2, AlertTriangle, WifiOff, Clock
 } from 'lucide-react';
 
+const GAMMA_API = 'https://gamma-api.polymarket.com';
+
+async function fetchBtcMarket() {
+  const res = await fetch(
+    `${GAMMA_API}/events?slug_contains=btc-updown-15m&active=true&closed=false&limit=10`
+  );
+  if (!res.ok) throw new Error(`Gamma API ${res.status}`);
+  const events = await res.json();
+
+  const now = Date.now();
+  const active = events
+    .filter(e => e.markets && e.markets.length >= 2 && new Date(e.endDate).getTime() > now)
+    .sort((a, b) => new Date(a.endDate) - new Date(b.endDate));
+
+  if (!active.length) throw new Error('Нет активных BTC 15-min рынков');
+
+  const ev = active[0];
+
+  let upMkt = null, downMkt = null;
+  for (const m of ev.markets) {
+    const q = (m.question || m.slug || '').toLowerCase();
+    if (q.includes('up')) upMkt = m;
+    else if (q.includes('down')) downMkt = m;
+  }
+  if (!upMkt)   upMkt   = ev.markets[0];
+  if (!downMkt) downMkt = ev.markets[1];
+
+  const parsePrice = (m) => {
+    try {
+      const arr = typeof m.outcomePrices === 'string'
+        ? JSON.parse(m.outcomePrices)
+        : m.outcomePrices;
+      const v = parseFloat(arr[0]);
+      return isNaN(v) ? 0.5 : v;
+    } catch { return 0.5; }
+  };
+
+  return {
+    upPrice:   parsePrice(upMkt),
+    downPrice: parsePrice(downMkt),
+    title:     ev.title || ev.slug || 'BTC Up or Down',
+    endTime:   new Date(ev.endDate).getTime(),
+    slug:      ev.slug,
+  };
+}
+
+function formatTtl(ms) {
+  if (ms <= 0) return '00:00';
+  const total = Math.floor(ms / 1000);
+  const m = Math.floor(total / 60).toString().padStart(2, '0');
+  const s = (total % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
 const App = () => {
-  // Параметры системы
   const [config, setConfig] = useState({
-    targetVolume: 500,     // Желаемый объем выкупа (контрактов)
-    bookDepth: 0.8,        // Ликвидность (чем меньше, тем быстрее растет цена от объема)
-    commission: 0.015,     // 1.5% комиссия
-    threshold: 0.04,       // Защитный порог $0.04
-    networkLag: 400,       // Лаг в мс
-    volatility: 0.02       // Риск изменения цены во время лага
+    targetVolume: 500,
+    bookDepth:    0.8,
+    takerFee:     0.02,
+    threshold:    0.04,
+    networkLag:   400,
+    volatility:   0.02,
   });
 
-  const [market, setMarket] = useState({ yesPrice: 0.44, noPrice: 0.48 });
+  const [market, setMarket]         = useState({ yesPrice: 0.50, noPrice: 0.50 });
+  const [marketInfo, setMarketInfo] = useState(null);
+  const [ttl, setTtl]               = useState(null);
+  const [liveStatus, setLiveStatus] = useState('loading');
+  const [fetchError, setFetchError] = useState(null);
   const [executionResult, setExecutionResult] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isProcessing, setIsProcessing]       = useState(false);
 
-  // Живой рынок
+  const loadMarket = useCallback(async () => {
+    try {
+      const data = await fetchBtcMarket();
+      setMarket({ yesPrice: data.upPrice, noPrice: data.downPrice });
+      setMarketInfo({ title: data.title, endTime: data.endTime, slug: data.slug });
+      setLiveStatus('live');
+      setFetchError(null);
+    } catch (err) {
+      setLiveStatus('error');
+      setFetchError(err.message);
+    }
+  }, []);
+
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (isProcessing) return;
-      setMarket(prev => ({
-        yesPrice: Math.max(0.4, Math.min(0.55, prev.yesPrice + (Math.random() - 0.5) * 0.005)),
-        noPrice: Math.max(0.4, Math.min(0.55, prev.noPrice + (Math.random() - 0.5) * 0.005))
-      }));
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [isProcessing]);
+    loadMarket();
+    const t = setInterval(loadMarket, 30_000);
+    return () => clearInterval(t);
+  }, [loadMarket]);
 
-  // Расчет "Водопада Арбитража"
+  useEffect(() => {
+    if (!marketInfo?.endTime) return;
+    setTtl(Math.max(0, marketInfo.endTime - Date.now()));
+    const t = setInterval(() => {
+      setTtl(prev => Math.max(0, prev - 1000));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [marketInfo?.endTime]);
+
   const pipeline = useMemo(() => {
-    // 1. Теоретический спред (Best Ask)
     const rawSpread = 1.0 - (market.yesPrice + market.noPrice);
 
-    // 2. Влияние VWAP (Ликвидность)
     const slippageFactor = (1 - config.bookDepth) * 0.0001;
     const vwapYes = market.yesPrice + (config.targetVolume * slippageFactor / 2);
-    const vwapNo = market.noPrice + (config.targetVolume * slippageFactor / 2);
+    const vwapNo  = market.noPrice  + (config.targetVolume * slippageFactor / 2);
     const vwapImpact = (vwapYes + vwapNo) - (market.yesPrice + market.noPrice);
     const profitAfterVWAP = rawSpread - vwapImpact;
 
-    // 3. Комиссии
-    const feeImpact = (vwapYes + vwapNo) * config.commission;
+    const feeImpact = (vwapYes + vwapNo) * config.takerFee * 2;
     const profitAfterFees = profitAfterVWAP - feeImpact;
 
-    // 4. Защитный порог (Threshold)
     const finalBuffer = profitAfterFees - config.threshold;
 
     return [
-      { name: 'Raw Spread', value: rawSpread, color: '#3b82f6', desc: 'Теоретическая разница цен' },
-      { name: 'VWAP Loss', value: -vwapImpact, color: '#ef4444', desc: 'Проскальзывание в стакане' },
-      { name: 'Fees', value: -feeImpact, color: '#f59e0b', desc: 'Комиссия площадки' },
-      { name: 'Threshold', value: -config.threshold, color: '#8b5cf6', desc: 'Запас на неатомарность' },
-      { name: 'Net Profit', value: finalBuffer, color: finalBuffer > 0 ? '#10b981' : '#64748b', desc: 'Ожидаемый результат' }
+      { name: 'Raw Spread', value: rawSpread,        color: '#3b82f6', desc: 'Теоретическая разница цен' },
+      { name: 'VWAP Loss',  value: -vwapImpact,      color: '#ef4444', desc: 'Проскальзывание в стакане' },
+      { name: 'Fees ×2',    value: -feeImpact,       color: '#f59e0b', desc: `Taker fee ${(config.takerFee*100).toFixed(1)}% × 2 лега` },
+      { name: 'Threshold',  value: -config.threshold, color: '#8b5cf6', desc: 'Запас на неатомарность' },
+      { name: 'Net Profit', value: finalBuffer,       color: finalBuffer > 0 ? '#10b981' : '#64748b', desc: 'Ожидаемый результат' },
     ];
   }, [market, config]);
 
@@ -68,21 +134,10 @@ const App = () => {
   const handleExecute = async () => {
     setIsProcessing(true);
     setExecutionResult(null);
-
-    const startPrice = market.yesPrice;
-
     await new Promise(r => setTimeout(r, config.networkLag));
-
     const slippageEvent = (Math.random() - 0.4) * config.volatility;
-    const finalNoPrice = market.noPrice + slippageEvent;
-
     const realProfit = pipeline[4].value - slippageEvent;
-
-    setExecutionResult({
-      success: realProfit > 0,
-      value: realProfit,
-      slippage: slippageEvent
-    });
+    setExecutionResult({ success: realProfit > 0, value: realProfit, slippage: slippageEvent });
     setIsProcessing(false);
   };
 
@@ -90,23 +145,59 @@ const App = () => {
     <div className="min-h-screen bg-gray-100 p-4 md:p-8 font-sans">
       <div className="max-w-6xl mx-auto space-y-6">
 
+        {fetchError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-center gap-3 text-sm text-red-700">
+            <WifiOff size={16} className="shrink-0" />
+            <span>API недоступен: {fetchError}. Показаны последние известные цены.</span>
+          </div>
+        )}
+
         {/* Header */}
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-          <div className="flex justify-between items-center">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
             <div>
               <h1 className="text-2xl font-black text-gray-800 uppercase tracking-tight flex items-center gap-2">
                 <Layers className="text-blue-600" /> Pipeline Арбитража
               </h1>
-              <p className="text-gray-500 text-sm">От сырого спреда до чистого профита: как «умирает» сделка</p>
+              <p className="text-gray-500 text-sm mt-0.5 flex items-center gap-2">
+                {liveStatus === 'live' ? (
+                  <span className="flex items-center gap-1.5 text-green-600 font-semibold">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                    </span>
+                    LIVE
+                  </span>
+                ) : liveStatus === 'loading' ? (
+                  <span className="text-yellow-600 font-semibold">Загрузка...</span>
+                ) : (
+                  <span className="flex items-center gap-1 text-red-500 font-semibold">
+                    <WifiOff size={12}/> OFFLINE
+                  </span>
+                )}
+                {marketInfo && <span className="text-gray-400 truncate max-w-xs">{marketInfo.title}</span>}
+              </p>
             </div>
-            <div className="flex gap-4">
+            <div className="flex items-center gap-4 flex-wrap">
+              {ttl !== null && (
+                <div className="flex items-center gap-1.5 bg-gray-900 text-white px-3 py-1.5 rounded-lg">
+                  <Clock size={13} className="text-gray-400" />
+                  <span className="font-mono font-bold text-sm">{formatTtl(ttl)}</span>
+                </div>
+              )}
               <div className="text-right">
-                <span className="text-[10px] font-bold text-gray-400 uppercase">Yes Ask</span>
+                <span className="text-[10px] font-bold text-gray-400 uppercase">Up Ask</span>
                 <div className="text-xl font-mono font-bold text-blue-600">${market.yesPrice.toFixed(3)}</div>
               </div>
               <div className="text-right">
-                <span className="text-[10px] font-bold text-gray-400 uppercase">No Ask</span>
+                <span className="text-[10px] font-bold text-gray-400 uppercase">Down Ask</span>
                 <div className="text-xl font-mono font-bold text-red-500">${market.noPrice.toFixed(3)}</div>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] font-bold text-gray-400 uppercase">Сумма</span>
+                <div className={`text-xl font-mono font-bold ${(market.yesPrice + market.noPrice) < 1.0 ? 'text-green-600' : 'text-gray-400'}`}>
+                  ${(market.yesPrice + market.noPrice).toFixed(3)}
+                </div>
               </div>
             </div>
           </div>
@@ -118,10 +209,10 @@ const App = () => {
           <div className="lg:col-span-4 space-y-4">
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
               <h3 className="text-sm font-bold text-gray-700 mb-4 flex items-center gap-2 uppercase tracking-wider">
-                <Activity size={16} /> Рыночные условия
+                <Activity size={16} /> Параметры
               </h3>
-
               <div className="space-y-5">
+
                 <div>
                   <div className="flex justify-between text-xs mb-2">
                     <span className="text-gray-500">Объем сделки</span>
@@ -144,6 +235,19 @@ const App = () => {
 
                 <div className="pt-2 border-t border-gray-100">
                   <div className="flex justify-between text-xs mb-2">
+                    <span className="text-gray-500">Taker Fee (каждый лег)</span>
+                    <span className="font-bold text-yellow-600">{(config.takerFee * 100).toFixed(1)}%</span>
+                  </div>
+                  <input type="range" min="0" max="0.05" step="0.001" value={config.takerFee}
+                    onChange={e => setConfig({...config, takerFee: parseFloat(e.target.value)})}
+                    className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-yellow-500" />
+                  <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+                    <span>0%</span><span>↑ Polymarket ~2%</span><span>5%</span>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-gray-100">
+                  <div className="flex justify-between text-xs mb-2">
                     <span className="text-gray-500">Защитный порог (Risk Buffer)</span>
                     <span className="font-bold text-purple-600">${config.threshold.toFixed(2)}</span>
                   </div>
@@ -151,36 +255,42 @@ const App = () => {
                     onChange={e => setConfig({...config, threshold: parseFloat(e.target.value)})}
                     className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-600" />
                 </div>
+
               </div>
             </div>
 
             <div className={`p-5 rounded-2xl shadow-lg transition-all border-2 ${canExecute ? 'bg-green-600 border-green-400' : 'bg-gray-800 border-gray-700'}`}>
-               <div className="text-white">
-                  <h4 className="text-xs font-bold opacity-80 uppercase mb-1">Статус Триггера</h4>
-                  <div className="flex justify-between items-end">
-                    <div className="text-2xl font-black">
-                      {canExecute ? 'READY TO SEND' : 'WAITING...'}
-                    </div>
-                    {canExecute && <Zap className="text-yellow-300 animate-pulse" size={24} fill="currentColor" />}
+              <div className="text-white">
+                <h4 className="text-xs font-bold opacity-80 uppercase mb-1">Статус Триггера</h4>
+                <div className="flex justify-between items-end">
+                  <div className="text-2xl font-black">
+                    {canExecute ? 'READY TO SEND' : 'WAITING...'}
                   </div>
-                  <button
-                    disabled={!canExecute || isProcessing}
-                    onClick={handleExecute}
-                    className={`w-full mt-4 py-3 rounded-xl font-bold transition-all shadow-inner uppercase tracking-widest text-sm ${
-                      canExecute
-                      ? 'bg-white text-green-700 hover:bg-green-50 active:scale-95'
-                      : 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                    }`}
-                  >
-                    {isProcessing ? 'Исполнение...' : 'Открыть позицию'}
-                  </button>
-               </div>
+                  {canExecute && <Zap className="text-yellow-300 animate-pulse" size={24} fill="currentColor" />}
+                </div>
+                <button
+                  disabled={!canExecute || isProcessing}
+                  onClick={handleExecute}
+                  className={`w-full mt-4 py-3 rounded-xl font-bold transition-all shadow-inner uppercase tracking-widest text-sm ${
+                    canExecute
+                    ? 'bg-white text-green-700 hover:bg-green-50 active:scale-95'
+                    : 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                  }`}
+                >
+                  {isProcessing ? 'Исполнение...' : 'Открыть позицию'}
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Visualization Waterfall */}
+          {/* Waterfall */}
           <div className="lg:col-span-8 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-            <h3 className="text-sm font-bold text-gray-700 mb-6 uppercase tracking-wider">Водопад прибыли на акцию ($1.00)</h3>
+            <h3 className="text-sm font-bold text-gray-700 mb-6 uppercase tracking-wider">
+              Водопад прибыли на акцию ($1.00)
+              <span className="ml-2 text-[10px] text-gray-400 normal-case font-normal">
+                fee {(config.takerFee*100).toFixed(1)}% × 2 лега
+              </span>
+            </h3>
             <div className="h-80 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={pipeline} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
@@ -213,20 +323,19 @@ const App = () => {
               </ResponsiveContainer>
             </div>
 
-            <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
-               {pipeline.map((item, i) => (
-                 <div key={i} className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                    <div className="text-[10px] font-bold text-gray-400 uppercase leading-tight">{item.name}</div>
-                    <div className="text-sm font-mono font-bold mt-1" style={{color: item.color}}>
-                      {item.value > 0 ? '+' : ''}{item.value.toFixed(3)}
-                    </div>
-                 </div>
-               ))}
+            <div className="mt-6 grid grid-cols-2 md:grid-cols-5 gap-3">
+              {pipeline.map((item, i) => (
+                <div key={i} className="bg-gray-50 p-3 rounded-xl border border-gray-100">
+                  <div className="text-[10px] font-bold text-gray-400 uppercase leading-tight">{item.name}</div>
+                  <div className="text-sm font-mono font-bold mt-1" style={{color: item.color}}>
+                    {item.value > 0 ? '+' : ''}{item.value.toFixed(3)}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
 
-        {/* Execution Results */}
         {executionResult && (
           <div className={`p-6 rounded-2xl border-2 flex flex-col md:flex-row items-center gap-6 ${
             executionResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'
@@ -241,20 +350,21 @@ const App = () => {
                 {executionResult.success ? 'Успешный арбитраж!' : 'Убыточная сделка'}
               </h3>
               <p className="text-sm text-gray-600">
-                Проскальзывание второй ноги составило <span className="font-bold">${executionResult.slippage.toFixed(4)}</span>.
+                Проскальзывание второй ноги: <span className="font-bold">${executionResult.slippage.toFixed(4)}</span>.
                 {executionResult.success
-                  ? ' Ваш защитный порог (Threshold) выдержал удар.'
-                  : ' Проскальзывание оказалось сильнее вашего порога прибыли.'}
+                  ? ' Порог выдержал удар.'
+                  : ' Проскальзывание сильнее порога прибыли.'}
               </p>
             </div>
             <div className="text-center md:text-right">
-               <div className="text-[10px] font-bold text-gray-400 uppercase">Итоговый PnL</div>
-               <div className={`text-3xl font-black font-mono ${executionResult.success ? 'text-green-600' : 'text-red-600'}`}>
-                 ${executionResult.value.toFixed(3)}
-               </div>
+              <div className="text-[10px] font-bold text-gray-400 uppercase">Итоговый PnL</div>
+              <div className={`text-3xl font-black font-mono ${executionResult.success ? 'text-green-600' : 'text-red-600'}`}>
+                ${executionResult.value.toFixed(3)}
+              </div>
             </div>
           </div>
         )}
+
       </div>
     </div>
   );
