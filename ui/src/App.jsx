@@ -9,15 +9,20 @@ import {
 const GAMMA_API = '/api/gamma';
 
 async function fetchBtcMarket() {
+  // slug_contains не поддерживается API — фильтруем client-side
   const res = await fetch(
-    `${GAMMA_API}/events?slug_contains=btc-updown-15m&active=true&closed=false&limit=10`
+    `${GAMMA_API}/events?active=true&closed=false&limit=100`
   );
   if (!res.ok) throw new Error(`Gamma API ${res.status}`);
   const events = await res.json();
 
   const now = Date.now();
   const active = events
-    .filter(e => e.markets && e.markets.length >= 2 && new Date(e.endDate).getTime() > now)
+    .filter(e =>
+      e.slug && e.slug.includes('btc-updown-15m') &&
+      e.markets && e.markets.length >= 2 &&
+      new Date(e.endDate).getTime() > now
+    )
     .sort((a, b) => new Date(a.endDate) - new Date(b.endDate));
 
   if (!active.length) throw new Error('Нет активных BTC 15-min рынков');
