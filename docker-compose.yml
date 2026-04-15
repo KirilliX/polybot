@@ -1,0 +1,17 @@
+services:
+  polybot:
+    build:
+      context: ./polymarket-arb-bot
+      dockerfile: Dockerfile
+    image: polybot:latest
+    container_name: polybot
+    restart: unless-stopped
+    volumes:
+      - /root/polybot-config:/app/config:ro
+    environment:
+      - RUST_LOG=info
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
