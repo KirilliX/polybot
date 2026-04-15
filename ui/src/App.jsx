@@ -6,7 +6,7 @@ import {
   Zap, Layers, Activity, CheckCircle2, AlertTriangle, WifiOff, Clock
 } from 'lucide-react';
 
-const GAMMA_API = 'https://gamma-api.polymarket.com';
+const GAMMA_API = '/api/gamma';
 
 async function fetchBtcMarket() {
   const res = await fetch(

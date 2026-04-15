@@ -35,19 +35,14 @@ jobs:
               apt-get install -y nodejs
             fi
 
-            # Установка serve если нет
-            if ! command -v serve &>/dev/null; then
-              npm install -g serve
-            fi
-
             # Сборка UI
             cd /root/polybot/ui
             npm install --prefer-offline
             npm run build
 
-            # Создаём systemd service (путь serve — динамически)
-            SERVE_BIN=$(which serve)
-            printf '[Unit]\nDescription=Polymarket Bot UI\nAfter=network.target\n\n[Service]\nType=simple\nWorkingDirectory=/root/polybot/ui\nExecStart=%s dist -p 3000 --no-clipboard\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=multi-user.target\n' "$SERVE_BIN" > /etc/systemd/system/polybot-ui.service
+            # Создаём systemd service (node server.js — прокси + статика)
+            NODE_BIN=$(which node)
+            printf '[Unit]\nDescription=Polymarket Bot UI\nAfter=network.target\n\n[Service]\nType=simple\nWorkingDirectory=/root/polybot/ui\nExecStart=%s server.js\nRestart=always\nRestartSec=3\nEnvironment=NODE_ENV=production\n\n[Install]\nWantedBy=multi-user.target\n' "$NODE_BIN" > /etc/systemd/system/polybot-ui.service
 
             systemctl daemon-reload
             systemctl enable polybot-ui
