@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Polymarket BTC Arbitrage Bot — Схема</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1117; color: #e2e8f0; font-family: 'Segoe UI', sans-serif; padding: 32px; }
+  h1 { text-align: center; font-size: 18px; color: #94a3b8; margin-bottom: 32px; letter-spacing: 2px; text-transform: uppercase; }
+
+  .canvas { position: relative; width: 100%; min-height: 900px; }
+  svg.arrows { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+
+  .node {
+    position: absolute;
+    border-radius: 12px;
+    padding: 12px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    cursor: default;
+    transition: transform 0.15s, box-shadow 0.15s;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .node:hover { transform: scale(1.05); }
+
+  .node.source  { background: #1e3a5f; border: 2px solid #3b82f6; color: #93c5fd; box-shadow: 0 0 16px #3b82f630; }
+  .node.process { background: #1e293b; border: 2px solid #475569; color: #cbd5e1; }
+  .node.decision{ background: #2d1b4e; border: 2px solid #8b5cf6; color: #c4b5fd; }
+  .node.action  { background: #14291a; border: 2px solid #22c55e; color: #86efac; }
+  .node.profit  { background: #14291a; border: 2px solid #10b981; color: #6ee7b7; box-shadow: 0 0 20px #10b98130; }
+  .node.risk    { background: #2d1414; border: 2px solid #ef4444; color: #fca5a5; }
+  .node.oracle  { background: #1e2a1e; border: 2px solid #f59e0b; color: #fcd34d; }
+
+  .label {
+    position: absolute;
+    font-size: 11px;
+    color: #64748b;
+    font-weight: 600;
+    background: #0f1117;
+    padding: 1px 4px;
+    border-radius: 4px;
+  }
+
+  .legend {
+    margin-top: 32px;
+    display: flex; gap: 16px; flex-wrap: wrap; justify-content: center;
+    font-size: 12px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+
+  /* Tooltip */
+  .node[data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e293b;
+    border: 1px solid #475569;
+    color: #e2e8f0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 400;
+    white-space: nowrap;
+    z-index: 10;
+    pointer-events: none;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<h1>Polymarket BTC Arbitrage Bot — Поток исполнения</h1>
+
+<div class="canvas" id="canvas">
+  <svg class="arrows" id="arrows"></svg>
+
+  <!-- DATA SOURCES -->
+  <div class="node source" id="n_ws_poly"   style="left:160px; top:10px"  data-tip="wss://ws-subscriptions-clob.polymarket.com&#10;Subscribe: price feed для токенов Yes/No">WebSocket<br>Polymarket CLOB</div>
+  <div class="node oracle" id="n_oracle"    style="left:520px; top:10px"  data-tip="Pyth Network / Binance WS&#10;Реальная цена BTC — опережает Polymarket oracle">Oracle<br>BTC Цена</div>
+
+  <!-- AGGREGATOR -->
+  <div class="node process" id="n_agg"      style="left:340px; top:110px" data-tip="Обновляется каждый тик&#10;yes_price, no_price, btc_price, market_close_time">Агрегатор состояния рынка<br><small>yes | no | btc | ttl</small></div>
+
+  <!-- MAIN CHECK -->
+  <div class="node decision" id="n_spread"  style="left:310px; top:220px" data-tip="yes_price + no_price &lt; threshold (напр. 0.97)&#10;Чистый арбитраж: купить оба → $1.00 при resolution">Спред открыт?<br><small>Yes + No &lt; 0.97</small></div>
+
+  <!-- ORACLE BRANCH -->
+  <div class="node decision" id="n_oracle2" style="left:100px; top:340px" data-tip="Если BTC цена известна заранее&#10;— покупаем только правильную сторону по лучшей цене">Oracle режим?<br><small>BTC известен</small></div>
+
+  <!-- ARBI BOTH -->
+  <div class="node action" id="n_buy_both"  style="left:450px; top:340px" data-tip="Limit order: Buy Yes @ ask_yes&#10;Limit order: Buy No  @ ask_no&#10;Оба исполнились → гарантированный $1.00">Купить Yes + No<br><small>оба лега сразу</small></div>
+
+  <!-- ORACLE ONE SIDE -->
+  <div class="node action" id="n_buy_one"   style="left:60px;  top:460px" data-tip="Купить тот лег, который разрешится в $1.00&#10;Например: BTC > X → Buy Yes @ 0.47&#10;Профит = 1.00 - 0.47 = 0.53">Купить одну сторону<br><small>по сигналу oracle</small></div>
+
+  <!-- WAIT NO -->
+  <div class="node process" id="n_wait"     style="left:620px; top:220px" data-tip="Спред слишком мал, ждём следующего тика">Ждать<br><small>следующий тик</small></div>
+
+  <!-- POSITION MONITOR -->
+  <div class="node process" id="n_monitor"  style="left:310px; top:570px" data-tip="Проверяем каждые N мс:&#10;— рынок закрылся?&#10;— цена изменилась?&#10;— один лег не заполнен?">Мониторинг позиции<br><small>polling / WS</small></div>
+
+  <!-- DECISIONS -->
+  <div class="node decision" id="n_resolve" style="left:140px; top:680px" data-tip="Polymarket публикует resolution&#10;Победитель получает $1.00 за контракт">Рынок<br>закрылся?</div>
+
+  <div class="node decision" id="n_partial" style="left:480px; top:680px" data-tip="Один ордер исполнился, второй — нет&#10;Риск: открытая позиция без хеджа">Один лег<br>не заполнен?</div>
+
+  <!-- OUTCOMES -->
+  <div class="node profit"  id="n_profit"   style="left:60px;  top:800px" data-tip="$1.00 per pair&#10;Minus комиссии Polymarket (~1-2%)">Забрать $1.00<br><small>Redeem / автовыплата</small></div>
+
+  <div class="node risk"    id="n_cancel"   style="left:560px; top:800px" data-tip="Отменить незаполненный ордер&#10;Принять частичный убыток или выйти в ноль">Отменить ордер<br><small>или хеджировать</small></div>
+
+  <div class="node process" id="n_pnl"      style="left:300px; top:800px" data-tip="Записать сделку, обновить статистику&#10;Перейти к следующему рынку">PnL → следующий<br>рынок / цикл</div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>Источник данных</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div>Oracle (BTC)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#475569"></div>Процесс</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#8b5cf6"></div>Решение</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>Действие (ордер)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div>Прибыль</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div>Риск</div>
+  <div class="legend-item" style="color:#64748b; font-size:11px">— Наведи на узел для деталей</div>
+</div>
+
+<script>
+const arrows = [
+  // sources → aggregator
+  { from:'n_ws_poly',   to:'n_agg',     label:'' },
+  { from:'n_oracle',    to:'n_agg',     label:'' },
+  // aggregator → spread check
+  { from:'n_agg',       to:'n_spread',  label:'' },
+  // spread → branches
+  { from:'n_spread',    to:'n_oracle2', label:'ДА', color:'#22c55e' },
+  { from:'n_spread',    to:'n_buy_both',label:'ДА', color:'#22c55e' },
+  { from:'n_spread',    to:'n_wait',    label:'НЕТ', color:'#ef4444' },
+  // wait → back to aggregator (loop)
+  { from:'n_wait',      to:'n_agg',     label:'loop', color:'#475569', dashed:true },
+  // oracle branch
+  { from:'n_oracle2',   to:'n_buy_one', label:'ДА', color:'#f59e0b' },
+  { from:'n_oracle2',   to:'n_buy_both',label:'НЕТ / тоже', color:'#475569' },
+  // buys → monitor
+  { from:'n_buy_both',  to:'n_monitor', label:'' },
+  { from:'n_buy_one',   to:'n_monitor', label:'' },
+  // monitor → decisions
+  { from:'n_monitor',   to:'n_resolve', label:'' },
+  { from:'n_monitor',   to:'n_partial', label:'' },
+  // outcomes
+  { from:'n_resolve',   to:'n_profit',  label:'ДА', color:'#10b981' },
+  { from:'n_resolve',   to:'n_monitor', label:'НЕТ', color:'#475569', dashed:true },
+  { from:'n_partial',   to:'n_cancel',  label:'ДА', color:'#ef4444' },
+  { from:'n_partial',   to:'n_monitor', label:'НЕТ', color:'#475569', dashed:true },
+  { from:'n_profit',    to:'n_pnl',     label:'' },
+  { from:'n_cancel',    to:'n_pnl',     label:'' },
+];
+
+function center(el) {
+  return {
+    x: el.offsetLeft + el.offsetWidth / 2,
+    y: el.offsetTop  + el.offsetHeight / 2,
+  };
+}
+function bottom(el) {
+  return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop + el.offsetHeight };
+}
+function top(el) {
+  return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop };
+}
+
+function drawArrows() {
+  const svg = document.getElementById('arrows');
+  svg.innerHTML = '';
+  // defs for arrowhead
+  const defs = document.createElementNS('http://www.w3.org/2000/svg','defs');
+  const mkMarker = (id, color) => {
+    const m = document.createElementNS('http://www.w3.org/2000/svg','marker');
+    m.setAttribute('id', id);
+    m.setAttribute('markerWidth','8'); m.setAttribute('markerHeight','6');
+    m.setAttribute('refX','7'); m.setAttribute('refY','3');
+    m.setAttribute('orient','auto');
+    const poly = document.createElementNS('http://www.w3.org/2000/svg','polygon');
+    poly.setAttribute('points','0 0, 8 3, 0 6');
+    poly.setAttribute('fill', color);
+    m.appendChild(poly); return m;
+  };
+  const colors = ['#475569','#22c55e','#ef4444','#10b981','#f59e0b'];
+  colors.forEach((c,i) => defs.appendChild(mkMarker('arr'+i, c)));
+  svg.appendChild(defs);
+
+  const colorMap = {'#22c55e':1,'#ef4444':2,'#10b981':3,'#f59e0b':4};
+
+  arrows.forEach(a => {
+    const fromEl = document.getElementById(a.from);
+    const toEl   = document.getElementById(a.to);
+    if (!fromEl || !toEl) return;
+    const p1 = bottom(fromEl);
+    const p2 = top(toEl);
+    const c  = a.color || '#475569';
+    const mi = colorMap[c] || 0;
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    const mx = (p1.x + p2.x) / 2;
+    const my = (p1.y + p2.y) / 2;
+    const d = `M ${p1.x} ${p1.y} C ${p1.x} ${p1.y+40}, ${p2.x} ${p2.y-40}, ${p2.x} ${p2.y}`;
+    path.setAttribute('d', d);
+    path.setAttribute('stroke', c);
+    path.setAttribute('stroke-width', '1.5');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('marker-end', `url(#arr${mi})`);
+    if (a.dashed) path.setAttribute('stroke-dasharray','5,4');
+    svg.appendChild(path);
+
+    if (a.label) {
+      const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+      text.setAttribute('x', mx);
+      text.setAttribute('y', my);
+      text.setAttribute('text-anchor','middle');
+      text.setAttribute('font-size','10');
+      text.setAttribute('font-weight','700');
+      text.setAttribute('fill', c);
+      text.textContent = a.label;
+      svg.appendChild(text);
+    }
+  });
+}
+
+window.addEventListener('load', drawArrows);
+window.addEventListener('resize', drawArrows);
+</script>
+</body>
+</html>
