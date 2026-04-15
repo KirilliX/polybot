@@ -9,10 +9,9 @@ import {
 const GAMMA_API = '/api/gamma';
 
 async function fetchBtcMarket() {
-  // slug_contains не поддерживается API — фильтруем client-side
-  const res = await fetch(
-    `${GAMMA_API}/events?active=true&closed=false&limit=100`
-  );
+  // Без фильтров active/closed — Polymarket помечает 15-min рынки closed сразу.
+  // Фильтруем исключительно client-side по слагу и endDate.
+  const res = await fetch(`${GAMMA_API}/events?limit=200`);
   if (!res.ok) throw new Error(`Gamma API ${res.status}`);
   const events = await res.json();
 
