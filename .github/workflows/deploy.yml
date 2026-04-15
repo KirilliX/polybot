@@ -1,0 +1,51 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            # Клонируем репо если нет, иначе обновляем
+            if [ -d /root/polybot ]; then
+              cd /root/polybot
+              git pull origin main
+            else
+              git clone https://github.com/KirilliX/polybot.git /root/polybot
+              cd /root/polybot
+            fi
+
+            # Установка Node.js если нет
+            if ! command -v node &>/dev/null; then
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+              apt-get install -y nodejs
+            fi
+
+            # Установка serve если нет
+            if ! command -v serve &>/dev/null; then
+              npm install -g serve
+            fi
+
+            # Сборка UI
+            cd /root/polybot/ui
+            npm install --prefer-offline
+            npm run build
+
+            # Перезапуск UI-сервера
+            pkill -f "serve dist" 2>/dev/null || true
+            nohup serve dist -p 3000 --no-clipboard > /tmp/ui.log 2>&1 &
+
+            echo "✅ Deploy complete. UI: http://${{ secrets.SERVER_HOST }}:3000"
