@@ -1,4 +1,4 @@
-// Простой сервер: отдаёт dist/ и проксирует /api/gamma → gamma-api.polymarket.com
+// Простой сервер: отдаёт dist/, проксирует /api/gamma и /api/clob
 const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
@@ -18,28 +18,38 @@ const MIME = {
   '.json': 'application/json',
 };
 
+function proxyTo(hostname, req, res) {
+  const targetPath = req.url.replace(/^\/api\/(gamma|clob)/, '') || '/';
+  const options = {
+    hostname,
+    path:    targetPath,
+    method:  'GET',
+    headers: { 'User-Agent': 'polybot-ui/1.0', 'Accept': 'application/json' },
+  };
+  const proxy = https.request(options, (upstream) => {
+    res.writeHead(upstream.statusCode, {
+      'Content-Type':                'application/json',
+      'Access-Control-Allow-Origin': '*',
+    });
+    upstream.pipe(res);
+  });
+  proxy.on('error', (e) => {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: e.message }));
+  });
+  proxy.end();
+}
+
 http.createServer((req, res) => {
   // ── Прокси на Gamma API ────────────────────────────────────────────────────
   if (req.url.startsWith('/api/gamma')) {
-    const targetPath = req.url.replace('/api/gamma', '') || '/';
-    const options = {
-      hostname: 'gamma-api.polymarket.com',
-      path:     targetPath,
-      method:   'GET',
-      headers:  { 'User-Agent': 'polybot-ui/1.0', 'Accept': 'application/json' },
-    };
-    const proxy = https.request(options, (upstream) => {
-      res.writeHead(upstream.statusCode, {
-        'Content-Type':                'application/json',
-        'Access-Control-Allow-Origin': '*',
-      });
-      upstream.pipe(res);
-    });
-    proxy.on('error', (e) => {
-      res.writeHead(502);
-      res.end(JSON.stringify({ error: e.message }));
-    });
-    proxy.end();
+    proxyTo('gamma-api.polymarket.com', req, res);
+    return;
+  }
+
+  // ── Прокси на CLOB API (живые цены из стакана) ────────────────────────────
+  if (req.url.startsWith('/api/clob')) {
+    proxyTo('clob.polymarket.com', req, res);
     return;
   }
 

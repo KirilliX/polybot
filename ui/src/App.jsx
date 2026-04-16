@@ -7,10 +7,10 @@ import {
 } from 'lucide-react';
 
 const GAMMA_API = '/api/gamma';
+const CLOB_API  = '/api/clob';
 
-async function fetchBtcMarket() {
-  // Без фильтров active/closed — Polymarket помечает 15-min рынки closed сразу.
-  // Фильтруем исключительно client-side по слагу и endDate.
+// Шаг 1: получить token IDs для текущего BTC 15-min рынка из Gamma API
+async function fetchBtcMarketInfo() {
   const res = await fetch(`${GAMMA_API}/events?limit=200`);
   if (!res.ok) throw new Error(`Gamma API ${res.status}`);
   const events = await res.json();
@@ -37,23 +37,43 @@ async function fetchBtcMarket() {
   if (!upMkt)   upMkt   = ev.markets[0];
   if (!downMkt) downMkt = ev.markets[1];
 
-  const parsePrice = (m) => {
+  const parseTokenId = (m) => {
+    try {
+      const arr = typeof m.clobTokenIds === 'string'
+        ? JSON.parse(m.clobTokenIds)
+        : (m.clobTokenIds || []);
+      return arr[0] || null;
+    } catch { return null; }
+  };
+
+  const parseFallbackPrice = (m) => {
     try {
       const arr = typeof m.outcomePrices === 'string'
-        ? JSON.parse(m.outcomePrices)
-        : m.outcomePrices;
+        ? JSON.parse(m.outcomePrices) : m.outcomePrices;
       const v = parseFloat(arr[0]);
       return isNaN(v) ? 0.5 : v;
     } catch { return 0.5; }
   };
 
   return {
-    upPrice:   parsePrice(upMkt),
-    downPrice: parsePrice(downMkt),
-    title:     ev.title || ev.slug || 'BTC Up or Down',
-    endTime:   new Date(ev.endDate).getTime(),
-    slug:      ev.slug,
+    upTokenId:     parseTokenId(upMkt),
+    downTokenId:   parseTokenId(downMkt),
+    upPriceFallback:   parseFallbackPrice(upMkt),
+    downPriceFallback: parseFallbackPrice(downMkt),
+    title:   ev.title || ev.slug || 'BTC Up or Down',
+    endTime: new Date(ev.endDate).getTime(),
+    slug:    ev.slug,
   };
+}
+
+// Шаг 2: получить живую цену best-ask из CLOB API по token ID
+async function fetchClobPrice(tokenId) {
+  if (!tokenId) return null;
+  const res = await fetch(`${CLOB_API}/price?token_id=${tokenId}&side=buy`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const v = parseFloat(data.price);
+  return isNaN(v) ? null : v;
 }
 
 function formatTtl(ms) {
@@ -76,18 +96,25 @@ const App = () => {
 
   const [market, setMarket]         = useState({ yesPrice: 0.50, noPrice: 0.50 });
   const [marketInfo, setMarketInfo] = useState(null);
+  const [tokenIds, setTokenIds]     = useState({ up: null, down: null });
   const [ttl, setTtl]               = useState(null);
   const [liveStatus, setLiveStatus] = useState('loading');
   const [fetchError, setFetchError] = useState(null);
   const [executionResult, setExecutionResult] = useState(null);
   const [isProcessing, setIsProcessing]       = useState(false);
 
-  const loadMarket = useCallback(async () => {
+  // Шаг 1: каждые 60с обновляем информацию о рынке и token IDs
+  const loadMarketInfo = useCallback(async () => {
     try {
-      const data = await fetchBtcMarket();
-      setMarket({ yesPrice: data.upPrice, noPrice: data.downPrice });
+      const data = await fetchBtcMarketInfo();
       setMarketInfo({ title: data.title, endTime: data.endTime, slug: data.slug });
-      setLiveStatus('live');
+      setTokenIds({ up: data.upTokenId, down: data.downTokenId });
+      // Фолбэк на цены из Gamma если CLOB ещё не загрузился
+      setMarket(prev =>
+        prev.yesPrice === 0.5 && prev.noPrice === 0.5
+          ? { yesPrice: data.upPriceFallback, noPrice: data.downPriceFallback }
+          : prev
+      );
       setFetchError(null);
     } catch (err) {
       setLiveStatus('error');
@@ -96,10 +123,31 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    loadMarket();
-    const t = setInterval(loadMarket, 30_000);
+    loadMarketInfo();
+    const t = setInterval(loadMarketInfo, 60_000);
     return () => clearInterval(t);
-  }, [loadMarket]);
+  }, [loadMarketInfo]);
+
+  // Шаг 2: каждые 5с тянем живые цены из CLOB API (best-ask из стакана)
+  useEffect(() => {
+    if (!tokenIds.up && !tokenIds.down) return;
+    const poll = async () => {
+      const [up, down] = await Promise.all([
+        fetchClobPrice(tokenIds.up),
+        fetchClobPrice(tokenIds.down),
+      ]);
+      if (up !== null || down !== null) {
+        setMarket({
+          yesPrice: up   ?? market.yesPrice,
+          noPrice:  down ?? market.noPrice,
+        });
+        setLiveStatus('live');
+      }
+    };
+    poll();
+    const t = setInterval(poll, 5_000);
+    return () => clearInterval(t);
+  }, [tokenIds.up, tokenIds.down]);
 
   useEffect(() => {
     if (!marketInfo?.endTime) return;
