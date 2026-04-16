@@ -8,29 +8,15 @@
     "private_key": "YOUR_POLYGON_PRIVATE_KEY_HEX",
     "proxy_wallet_address": "0xYOUR_PROXY_WALLET",
     "signature_type": 2,
-    "rpc_url": "https://polygon-rpc.com",
-    "ws_url": "wss://ws-subscriptions-clob.polymarket.com"
+    "rpc_url": "https://polygon-rpc.com"
   },
   "strategy": {
-    "soccer_tag_ids": ["100977", "100350"],
-    "market_poll_interval_secs": 120,
-    "market_refresh_interval_secs": 300,
-    "market_fetch_limit": 50,
-    "market_cache_path": "markets_cache.json",
-    "live_window_minutes": 135,
-    "trading_start_minutes_before": 5,
-    "min_minutes_into_game": 0,
-    "max_concurrent_markets": 1,
-    "nearest_upcoming_count": 5,
-    "buy_threshold": 0.95,
-    "risk_reduce_threshold": 0.13,
-    "sell_profit_threshold": 0.99,
-    "min_team_price_diff": 0.2,
-    "rising_buy_threshold_pct": 0.15,
-    "single_team_profit_rise_pct": 0.15,
-    "stale_price_data_points": 20,
-    "simulation_mode": true,
+    "taker_fee": 0.02,
+    "min_margin": 0.005,
     "shares": "100",
-    "trade_interval_secs": 60
+    "price_poll_interval_ms": 5000,
+    "market_refresh_interval_secs": 60,
+    "min_seconds_before_expiry": 120,
+    "simulation_mode": true
   }
 }

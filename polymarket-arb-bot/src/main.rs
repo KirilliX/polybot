@@ -1,7 +1,7 @@
 mod api;
+mod btc;
 mod config;
 mod models;
-mod soccer;
 mod strategy;
 
 use anyhow::Result;
@@ -10,7 +10,7 @@ use config::{Args, Config};
 use std::io::Write;
 use std::sync::Arc;
 use api::PolymarketApi;
-use strategy::SoccerStrategy;
+use strategy::BtcArbStrategy;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,9 +23,11 @@ async fn main() -> Result<()> {
     let config = Config::load(&args.config)?;
 
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    eprintln!("⚽ Polymarket Soccer Trading Bot");
-    eprintln!("   Buy team + Draw when sum < threshold; monitor via API (200ms poll)");
-    eprintln!("   Risk mgmt: sell team + buy opposite on price drop | Profit: sell both when sum >= 0.99");
+    eprintln!("BTC 15-min Spread Arb Bot");
+    eprintln!("  Simulation: {} | Fee: {:.1}% | Shares: {}",
+        config.strategy.simulation_mode,
+        config.strategy.taker_fee * 100.0,
+        config.strategy.shares);
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let api = Arc::new(PolymarketApi::new(
@@ -48,13 +50,13 @@ async fn main() -> Result<()> {
     if config.polymarket.private_key.is_some() {
         if let Err(e) = api.authenticate().await {
             log::error!("Authentication failed: {}", e);
-            anyhow::bail!("Authentication failed. Please check your credentials.");
+            anyhow::bail!("Authentication failed. Check credentials in config.json.");
         }
     } else {
-        log::warn!("⚠️ No private key provided. Bot can only monitor (no orders).");
+        log::warn!("No private key — monitoring only (no orders).");
     }
 
-    let strategy = SoccerStrategy::new(api, config);
+    let strategy = BtcArbStrategy::new(api, config);
     strategy.run().await
 }
 
@@ -92,21 +94,12 @@ async fn run_redeem_only(
     let mut ok_count = 0u32;
     let mut fail_count = 0u32;
     for cid in &cids {
-        eprintln!("\n--- Redeeming condition {} ---", &cid[..cid.len().min(18)]);
+        eprintln!("--- Redeeming {} ---", &cid[..cid.len().min(20)]);
         match api.redeem_tokens(cid, "", "Yes").await {
-            Ok(_) => {
-                eprintln!("Success: {}", cid);
-                ok_count += 1;
-            }
-            Err(e) => {
-                eprintln!("Failed to redeem {}: {} (skipping)", cid, e);
-                fail_count += 1;
-            }
+            Ok(_) => { eprintln!("OK: {}", cid); ok_count += 1; }
+            Err(e) => { eprintln!("FAIL {}: {} (skipping)", cid, e); fail_count += 1; }
         }
     }
-    eprintln!(
-        "\nRedeem complete. Succeeded: {}, Failed: {}",
-        ok_count, fail_count
-    );
+    eprintln!("Done. Succeeded: {}, Failed: {}", ok_count, fail_count);
     Ok(())
 }
