@@ -16,17 +16,18 @@ async function fetchBtcMarketInfo() {
   const events = await res.json();
 
   const now = Date.now();
-  const active = events
+  const btc = events
     .filter(e =>
       e.slug && e.slug.includes('btc-updown-15m') &&
-      e.markets && e.markets.length >= 2 &&
-      new Date(e.endDate).getTime() > now
+      e.markets && e.markets.length >= 2
     )
     .sort((a, b) => new Date(a.endDate) - new Date(b.endDate));
 
-  if (!active.length) throw new Error('Нет активных BTC 15-min рынков');
+  if (!btc.length) throw new Error('Нет BTC 15-min рынков в Gamma API');
 
-  const ev = active[0];
+  // Предпочитаем ещё не закрытые; если все закрыты — берём последний (стакан ещё живой)
+  const active = btc.filter(e => new Date(e.endDate).getTime() > now);
+  const ev = active.length ? active[0] : btc[btc.length - 1];
 
   let upMkt = null, downMkt = null;
   for (const m of ev.markets) {
@@ -66,14 +67,25 @@ async function fetchBtcMarketInfo() {
   };
 }
 
-// Шаг 2: получить живую цену best-ask из CLOB API по token ID
+// Шаг 2: best-ask из стакана CLOB /book (как в Rust-боте)
+// Asks возвращаются DESC (0.99 первый) → берём минимум
 async function fetchClobPrice(tokenId) {
   if (!tokenId) return null;
-  const res = await fetch(`${CLOB_API}/price?token_id=${tokenId}&side=buy`);
-  if (!res.ok) return null;
-  const data = await res.json();
-  const v = parseFloat(data.price);
-  return isNaN(v) ? null : v;
+  try {
+    const res = await fetch(`${CLOB_API}/book?token_id=${tokenId}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const asks = Array.isArray(data.asks) ? data.asks : [];
+    const prices = asks
+      .map(o => parseFloat(o.price))
+      .filter(p => !isNaN(p) && p > 0.01 && p < 0.99);
+    if (!prices.length) {
+      // Фоллбэк на last_trade_price если стакан пустой
+      const ltp = parseFloat(data.last_trade_price);
+      return (!isNaN(ltp) && ltp > 0.01 && ltp < 0.99) ? ltp : null;
+    }
+    return Math.min(...prices);
+  } catch { return null; }
 }
 
 function formatTtl(ms) {
